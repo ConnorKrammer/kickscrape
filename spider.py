@@ -1,27 +1,23 @@
 from __future__ import division
+from datetime import datetime
 import scrapy, re, json, html2text
 
 # Fields ordered alphabetically by first word
 class KickStatsItem(scrapy.Item):
     backer_count         = scrapy.Field() # int (backers)
     comment_count        = scrapy.Field() # int (comments)
-    creator_num_comments = scrapy.Field() # int (comments)
     creator_num_backed   = scrapy.Field() # int (projects)
-    creator_num_cancel   = scrapy.Field() # int (projects)
     creator_num_created  = scrapy.Field() # int (projects)
-    creator_num_failed   = scrapy.Field() # int (projects)
-    creator_num_success  = scrapy.Field() # int (projects)
-    date_end             = scrapy.Field() # ISO 8601 datetime
-    date_start           = scrapy.Field() # ISO 8601 datetime
     description_length   = scrapy.Field() # int (characters)
     description_images   = scrapy.Field() # int (images)
     description_links    = scrapy.Field() # int (links)
-    duration             = scrapy.Field() # int (days)
     funding_currency     = scrapy.Field() # ISO 4217 currency code
     funding_goal         = scrapy.Field() # int (currency)
     funding_raised       = scrapy.Field() # int (currency)
     funding_percent      = scrapy.Field() # float (percent)
     tier_count           = scrapy.Field() # int (tiers)
+    tier_limits          = scrapy.Field() # comma-separated int list (max backers/tier)
+    tier_limited_count   = scrapy.Field() # int (tiers)
     tier_text_length     = scrapy.Field() # comma-separated int list (characters/tier)
     tier_values          = scrapy.Field() # comma-separated int list (currency/tier)
     tier_backers         = scrapy.Field() # comma-separated int list (backers/tier)
@@ -30,6 +26,9 @@ class KickStatsItem(scrapy.Item):
     tier_backers_avg     = scrapy.Field() # float (backers)
     project_name         = scrapy.Field() # string
     project_url          = scrapy.Field() # url string
+    project_end          = scrapy.Field() # ISO 8601 datetime
+    project_start        = scrapy.Field() # ISO 8601 datetime
+    project_duration     = scrapy.Field() # int (days)
     project_status       = scrapy.Field() # "success" || "failure"
     project_video        = scrapy.Field() # boolean
     update_count         = scrapy.Field() # int (updates)
@@ -127,6 +126,7 @@ class KickSpider(scrapy.Spider):
         tier_values = []
         tier_backers = []
         tier_text_length = []
+        tier_limits = []
 
         for tier in tier_list:
             value = ''.join(tier.css('.pledge__amount::text').extract())
@@ -142,6 +142,19 @@ class KickSpider(scrapy.Spider):
             tier_length = len(re.sub(r'\W', '', tier_text)) # Count, excluding non-word characters
             tier_text_length.append(tier_length)
 
+            backer_limit = tier.css('.pledge__info .pledge__backer-count .pledge__limit')
+
+            if not backer_limit:
+                backer_limit = False
+            elif backer_limit.css('.reward__limit--all-gone'):
+                backer_limit = backers
+            else:
+                backer_limit = int(backer_limit.re(r'Limited \([\d]+ left of ([\d]+)\)')[0])
+            
+            tier_limits.append(backer_limit)
+
+        tier_limited_count = len(filter(bool, tier_limits))
+
         # Averages
         tier_values_avg      = sum(tier_values) / tier_count
         tier_backers_avg     = sum(tier_backers) / tier_count
@@ -151,11 +164,13 @@ class KickSpider(scrapy.Spider):
         tier_values      = ','.join(str(x) for x in tier_values)
         tier_backers     = ','.join(str(x) for x in tier_backers)
         tier_text_length = ','.join(str(x) for x in tier_text_length)
+        tier_limits      = ','.join(str(x) for x in tier_limits)
 
         # Assign all values to item
         item = KickStatsItem()
         item['project_name']         = project_name
         item['project_url']          = response.meta['url']
+        item['project_status']       = status
         item['funding_raised']       = funding_raised
         item['funding_goal']         = funding_goal
         item['funding_currency']     = funding_currency
@@ -167,6 +182,8 @@ class KickSpider(scrapy.Spider):
         item['description_images']   = description_images
         item['project_video']        = project_video
         item['tier_count']           = tier_count
+        item['tier_limits']          = tier_limits
+        item['tier_limited_count']   = tier_limited_count
         item['tier_values']          = tier_values
         item['tier_backers']         = tier_backers
         item['tier_values_avg']      = tier_values_avg
@@ -201,11 +218,15 @@ class KickSpider(scrapy.Spider):
         item = response.meta['item']
         status = response.meta['status']
 
-        # Get end and start date
+        # Get end and start date, then compute duration
         update_feed_start = response.css('.timeline .timeline__divider--launched')
         update_feed_end   = response.css('.timeline .timeline__divider:not(.timeline__divider--month)')
-        date_end   = update_feed_end.css('time::attr("datetime")').extract_first()
-        date_start = update_feed_start.css('time::attr("datetime")').extract_first()
+        project_start = update_feed_start.css('time::attr("datetime")').extract_first()
+        project_end   = update_feed_end.css('time::attr("datetime")').extract_first()
+
+        duration_start = datetime.strptime(project_start[0:-6], '%Y-%m-%dT%H:%M:%S')
+        duration_end   = datetime.strptime(project_end[0:-6],   '%Y-%m-%dT%H:%M:%S')
+        project_duration = (duration_end - duration_start).days
 
         # Get update information
         timeline_items = response.css('.timeline > *:not(.timeline__divider--month)')
@@ -262,8 +283,9 @@ class KickSpider(scrapy.Spider):
             update_times_avg    = False
 
         # Store values to pass along
-        item['date_start']          = date_start
-        item['date_end']            = date_end
+        item['project_start']       = project_start
+        item['project_end']         = project_end
+        item['project_duration']    = project_duration
         item['update_count']        = update_count
         item['update_comments']     = update_comments
         item['update_comments_avg'] = update_comments_avg
